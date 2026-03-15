@@ -5,6 +5,7 @@ and contextual features from historical fight data.
 """
 
 import math
+import os
 
 import numpy as np
 import pandas as pd
@@ -232,27 +233,106 @@ def build_rolling_stats(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_stat_diffs(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute diffs for the per-fighter ufcstats career stats."""
-    stat_pairs = [
-        ("sig_strikes_landed_pm", "sig_strikes_landed_pm_diff"),
-        ("sig_strikes_accuracy", "sig_strike_acc_diff"),
-        ("sig_strikes_defended", "sig_strike_def_diff"),
-        ("takedown_avg_per15m", "td_avg_diff"),
-        ("takedown_accuracy", "td_acc_diff"),
-        ("takedown_defence", "td_def_diff"),
-        ("submission_avg_attempted_per15m", "sub_avg_diff"),
-        ("sig_strikes_absorbed_pm", "sig_strikes_absorbed_pm_diff"),
-    ]
+FIGHT_STATS_PATH = os.path.join(
+    os.path.dirname(__file__), "data", "fight_stats.parquet"
+)
 
-    for suffix, diff_col in stat_pairs:
-        a_col = f"a_{suffix}"
-        b_col = f"b_{suffix}"
-        if a_col in df.columns and b_col in df.columns:
-            df[diff_col] = pd.to_numeric(df[a_col], errors="coerce") - \
-                           pd.to_numeric(df[b_col], errors="coerce")
-        else:
-            df[diff_col] = 0.0
+
+def build_rolling_fight_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute per-fighter rolling averages from scraped per-fight stats.
+
+    Uses data/fight_stats.parquet (one row per fighter per fight) to compute
+    cumulative averages of sig strikes, takedowns, etc. Only uses fights
+    BEFORE the current fight (no future leakage).
+    """
+    if not os.path.exists(FIGHT_STATS_PATH):
+        print("  WARNING: fight_stats.parquet not found, skipping rolling fight stats")
+        for col in ["sig_str_pm_diff", "sig_str_acc_diff", "sig_str_def_diff",
+                     "td_pm_diff", "td_acc_diff", "sub_att_pm_diff"]:
+            df[col] = 0.0
+        return df
+
+    stats = pd.read_parquet(FIGHT_STATS_PATH)
+    stats = stats.sort_values("event_date").reset_index(drop=True)
+
+    # Build cumulative stats per fighter
+    # Track: cumulative sig_str_landed, sig_str_attempted, td_landed, td_attempted,
+    #         sub_att, total fights, total time (approx)
+    fighter_cum = {}  # fighter -> {stat: cumulative_value, n_fights: int}
+
+    # Index stats by (fighter, event_date, event_name) for lookup
+    fighter_stats_at = {}  # fighter -> list of (date, stats_dict)
+    for row in stats.itertuples(index=False):
+        fighter_stats_at.setdefault(row.fighter, []).append({
+            "date": row.event_date,
+            "sig_str_landed": row.sig_str_landed,
+            "sig_str_attempted": row.sig_str_attempted,
+            "total_str_landed": row.total_str_landed,
+            "total_str_attempted": row.total_str_attempted,
+            "td_landed": row.td_landed,
+            "td_attempted": row.td_attempted,
+            "sub_att": row.sub_att,
+            "knockdowns": row.knockdowns,
+            "ctrl_seconds": row.ctrl_seconds,
+        })
+
+    # Process each fight in chronological order
+    # For each fighter, compute rolling averages from their PAST fights only
+    fighter_processed = {}  # fighter -> number of fights processed
+
+    def _get_rolling(fighter, fight_date):
+        """Get rolling averages for fighter using only fights before fight_date."""
+        history = fighter_stats_at.get(fighter, [])
+        past = [h for h in history if h["date"] < fight_date]
+
+        n = len(past)
+        if n == 0:
+            return {
+                "sig_str_pm": 0.0, "sig_str_acc": 0.0,
+                "td_pm": 0.0, "td_acc": 0.0,
+                "sub_att_pm": 0.0, "kd_pm": 0.0,
+            }
+
+        total_sig_landed = sum(h["sig_str_landed"] for h in past)
+        total_sig_attempted = sum(h["sig_str_attempted"] for h in past)
+        total_str_landed = sum(h["total_str_landed"] for h in past)
+        total_td_landed = sum(h["td_landed"] for h in past)
+        total_td_attempted = sum(h["td_attempted"] for h in past)
+        total_sub = sum(h["sub_att"] for h in past)
+        total_kd = sum(h["knockdowns"] for h in past)
+
+        return {
+            "sig_str_pm": total_sig_landed / n,  # per fight avg
+            "sig_str_acc": total_sig_landed / max(total_sig_attempted, 1),
+            "td_pm": total_td_landed / n,
+            "td_acc": total_td_landed / max(total_td_attempted, 1),
+            "sub_att_pm": total_sub / n,
+            "kd_pm": total_kd / n,
+        }
+
+    result_cols = {
+        "sig_str_pm_a": [], "sig_str_pm_b": [],
+        "sig_str_acc_a": [], "sig_str_acc_b": [],
+        "td_pm_a": [], "td_pm_b": [],
+        "td_acc_a": [], "td_acc_b": [],
+        "sub_att_pm_a": [], "sub_att_pm_b": [],
+        "kd_pm_a": [], "kd_pm_b": [],
+    }
+
+    for row in df.itertuples(index=False):
+        date = pd.Timestamp(row.date)
+        for side in ["a", "b"]:
+            fighter = row.fighter_a if side == "a" else row.fighter_b
+            rolling = _get_rolling(fighter, date)
+            for stat_key, val in rolling.items():
+                result_cols[f"{stat_key}_{side}"].append(val)
+
+    for col, vals in result_cols.items():
+        df[col] = vals
+
+    # Compute diffs
+    for stat in ["sig_str_pm", "sig_str_acc", "td_pm", "td_acc", "sub_att_pm", "kd_pm"]:
+        df[f"{stat}_diff"] = df[f"{stat}_a"] - df[f"{stat}_b"]
 
     return df
 
@@ -269,8 +349,8 @@ def build_feature_matrix(fights_path: str = FIGHTS_PATH,
     print("Building rolling fighter stats...")
     df = build_rolling_stats(df)
 
-    print("Building stat diffs...")
-    df = build_stat_diffs(df)
+    print("Building rolling fight stats from scraped data...")
+    df = build_rolling_fight_stats(df)
 
     # Fill NaN with defaults
     fill_values = {
@@ -286,13 +366,12 @@ def build_feature_matrix(fights_path: str = FIGHTS_PATH,
         "sub_rate_diff": 0.0,
         "recent_form_3_diff": 0.0,
         "days_since_last_fight_diff": 0.0,
-        "sig_strikes_landed_pm_diff": 0.0,
-        "sig_strike_acc_diff": 0.0,
-        "sig_strike_def_diff": 0.0,
-        "td_avg_diff": 0.0,
+        "sig_str_pm_diff": 0.0,
+        "sig_str_acc_diff": 0.0,
+        "td_pm_diff": 0.0,
         "td_acc_diff": 0.0,
-        "td_def_diff": 0.0,
-        "sub_avg_diff": 0.0,
+        "sub_att_pm_diff": 0.0,
+        "kd_pm_diff": 0.0,
         "stance_matchup": 0,
         "weight_class_encoded": 170,
         "is_title_fight": 0,
