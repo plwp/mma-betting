@@ -1,6 +1,6 @@
 """Feature engineering for MMA fight prediction.
 
-Builds fighter-level rolling stats, Glicko-2 ratings, physical attributes,
+Builds fighter-level Glicko-2 ratings, Elo, rolling career stats,
 and contextual features from historical fight data.
 """
 
@@ -18,12 +18,11 @@ from config import (
     GLICKO2_INIT_VOL,
     GLICKO2_TAU,
     GLICKO2_SEASON_RD_INFLATE,
-    WEIGHT_CLASSES,
 )
 
 
 def _glicko2_update(rating, rd, vol, opp_rating, opp_rd, score):
-    """Single Glicko-2 update. Returns (new_rating, new_rd, new_vol)."""
+    """Single Glicko-2 update."""
     mu = (rating - 1500) / 173.7178
     phi = rd / 173.7178
     mu_j = (opp_rating - 1500) / 173.7178
@@ -77,77 +76,184 @@ def _glicko2_update(rating, rd, vol, opp_rating, opp_rd, score):
     return 173.7178 * new_mu + 1500, 173.7178 * new_phi, new_vol
 
 
-def build_glicko2(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute per-fighter Glicko-2 ratings with inactivity RD inflation."""
-    df = df.sort_values("date").reset_index(drop=True)
-    ratings = {}  # fighter -> (rating, rd, vol, last_fight_date)
+def _elo_expected(ra, rb):
+    return 1.0 / (1.0 + 10 ** ((rb - ra) / 400))
 
-    cols = {
-        "f1_rating": [], "f1_rd": [],
-        "f2_rating": [], "f2_rd": [],
-    }
+
+def build_ratings(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute per-fighter Glicko-2 and Elo ratings."""
+    df = df.sort_values("date").reset_index(drop=True)
+
+    # State: fighter -> (glicko_rating, glicko_rd, glicko_vol, elo, last_date)
+    state = {}
+
+    def _get(fighter, date):
+        if fighter not in state:
+            state[fighter] = (GLICKO2_INIT_RATING, GLICKO2_INIT_RD,
+                              GLICKO2_INIT_VOL, 1500.0, date)
+            return state[fighter]
+        r, rd, vol, elo, last = state[fighter]
+        # Inflate RD for inactivity
+        days = (date - last).days
+        if days > 0:
+            periods = days / 90.0
+            rd = min(math.sqrt(rd**2 + (GLICKO2_SEASON_RD_INFLATE * periods)**2),
+                     GLICKO2_INIT_RD)
+            state[fighter] = (r, rd, vol, elo, last)
+        return state[fighter]
+
+    cols = {k: [] for k in [
+        "glicko_a", "glicko_b", "rd_a", "rd_b", "elo_a", "elo_b",
+    ]}
 
     for row in df.itertuples(index=False):
-        f1, f2 = row.fighter_1, row.fighter_2
         date = pd.Timestamp(row.date)
+        fa, fb = row.fighter_a, row.fighter_b
 
-        # Get or init states
-        for fighter in (f1, f2):
-            if fighter not in ratings:
-                ratings[fighter] = (GLICKO2_INIT_RATING, GLICKO2_INIT_RD, GLICKO2_INIT_VOL, date)
-            else:
-                r, rd, vol, last_date = ratings[fighter]
-                # Inflate RD based on inactivity
-                days_inactive = (date - last_date).days
-                if days_inactive > 0:
-                    periods = days_inactive / 90.0
-                    rd = min(math.sqrt(rd**2 + (GLICKO2_SEASON_RD_INFLATE * periods)**2),
-                             GLICKO2_INIT_RD)
-                    ratings[fighter] = (r, rd, vol, last_date)
+        r_a, rd_a, vol_a, elo_a, _ = _get(fa, date)
+        r_b, rd_b, vol_b, elo_b, _ = _get(fb, date)
 
-        r1, rd1, vol1, _ = ratings[f1]
-        r2, rd2, vol2, _ = ratings[f2]
+        cols["glicko_a"].append(r_a)
+        cols["glicko_b"].append(r_b)
+        cols["rd_a"].append(rd_a)
+        cols["rd_b"].append(rd_b)
+        cols["elo_a"].append(elo_a)
+        cols["elo_b"].append(elo_b)
 
-        cols["f1_rating"].append(r1)
-        cols["f1_rd"].append(rd1)
-        cols["f2_rating"].append(r2)
-        cols["f2_rd"].append(rd2)
+        score_a = float(row.a_wins)
 
-        # Update ratings
-        score1 = 1.0 if row.winner == f1 else (0.0 if row.winner == f2 else 0.5)
-        new_r1, new_rd1, new_vol1 = _glicko2_update(r1, rd1, vol1, r2, rd2, score1)
-        new_r2, new_rd2, new_vol2 = _glicko2_update(r2, rd2, vol2, r1, rd1, 1.0 - score1)
+        # Glicko update
+        nr_a, nrd_a, nvol_a = _glicko2_update(r_a, rd_a, vol_a, r_b, rd_b, score_a)
+        nr_b, nrd_b, nvol_b = _glicko2_update(r_b, rd_b, vol_b, r_a, rd_a, 1.0 - score_a)
 
-        ratings[f1] = (new_r1, new_rd1, new_vol1, date)
-        ratings[f2] = (new_r2, new_rd2, new_vol2, date)
+        # Elo update (K=32)
+        exp_a = _elo_expected(elo_a, elo_b)
+        new_elo_a = elo_a + 32 * (score_a - exp_a)
+        new_elo_b = elo_b + 32 * ((1 - score_a) - (1 - exp_a))
+
+        state[fa] = (nr_a, nrd_a, nvol_a, new_elo_a, date)
+        state[fb] = (nr_b, nrd_b, nvol_b, new_elo_b, date)
 
     for col, vals in cols.items():
         df[col] = vals
 
-    df["glicko_rating_diff"] = df["f1_rating"] - df["f2_rating"]
-    df["glicko_rd_diff"] = df["f1_rd"] - df["f2_rd"]
-    df["glicko_uncertainty"] = np.sqrt(df["f1_rd"]**2 + df["f2_rd"]**2)
+    df["glicko_rating_diff"] = df["glicko_a"] - df["glicko_b"]
+    df["glicko_rd_diff"] = df["rd_a"] - df["rd_b"]
+    df["glicko_uncertainty"] = np.sqrt(df["rd_a"]**2 + df["rd_b"]**2)
+    df["elo_diff"] = df["elo_a"] - df["elo_b"]
 
     # Glicko-derived win probability
-    g_rd = 1.0 / np.sqrt(1 + 3 * (df["f1_rd"]**2 + df["f2_rd"]**2) / (np.pi**2 * 173.7178**2))
-    df["glicko_prob"] = 1.0 / (1 + np.exp(-g_rd * (df["f1_rating"] - df["f2_rating"]) / 173.7178))
+    g = 1.0 / np.sqrt(1 + 3 * (df["rd_a"]**2 + df["rd_b"]**2) / (np.pi**2 * 173.7178**2))
+    df["glicko_prob"] = 1.0 / (1 + np.exp(-g * (df["glicko_a"] - df["glicko_b"]) / 173.7178))
 
     return df
 
 
 def build_rolling_stats(df: pd.DataFrame) -> pd.DataFrame:
-    """Build per-fighter rolling statistics from fight history.
+    """Build per-fighter rolling career statistics."""
+    df = df.sort_values("date").reset_index(drop=True)
 
-    TODO: Implement after data format is known. Key stats:
-    - sig_strikes_landed_pm, sig_strike_acc, sig_strike_def
-    - td_avg, td_acc, td_def
-    - sub_avg
-    - ko_rate, sub_rate
-    - win_pct, recent_form (last 3)
-    - days_since_last_fight
-    """
-    # Placeholder — will implement once we have the actual data schema
-    print("  Rolling stats: TODO after data inspection")
+    # Track per-fighter history
+    fighter_history = {}  # fighter -> list of fight dicts
+
+    stat_cols = {
+        "win_pct": [], "win_streak": [],
+        "ko_rate": [], "sub_rate": [],
+        "recent_form_3": [],
+        "days_since_last_fight": [],
+    }
+    # Duplicate for both sides
+    result_cols = {f"{k}_{side}": [] for k in stat_cols for side in ["a", "b"]}
+
+    for row in df.itertuples(index=False):
+        date = pd.Timestamp(row.date)
+
+        for side in ["a", "b"]:
+            fighter = row.fighter_a if side == "a" else row.fighter_b
+            won = (row.a_wins == 1) if side == "a" else (row.a_wins == 0)
+
+            hist = fighter_history.get(fighter, [])
+
+            if len(hist) == 0:
+                result_cols[f"win_pct_{side}"].append(0.5)
+                result_cols[f"win_streak_{side}"].append(0)
+                result_cols[f"ko_rate_{side}"].append(0.0)
+                result_cols[f"sub_rate_{side}"].append(0.0)
+                result_cols[f"recent_form_3_{side}"].append(0.5)
+                result_cols[f"days_since_last_fight_{side}"].append(365.0)
+            else:
+                wins = [h["won"] for h in hist]
+                result_cols[f"win_pct_{side}"].append(np.mean(wins))
+
+                # Current win/loss streak (computed from history only, no leakage)
+                streak = 0
+                if wins:
+                    last_outcome = wins[-1]
+                    for w in reversed(wins):
+                        if w == last_outcome:
+                            streak += 1
+                        else:
+                            break
+                    if not last_outcome:
+                        streak = -streak
+                result_cols[f"win_streak_{side}"].append(streak)
+
+                methods = [h["method_cat"] for h in hist if h["won"]]
+                n_wins = len(methods)
+                result_cols[f"ko_rate_{side}"].append(
+                    sum(1 for m in methods if m == "KO/TKO") / max(n_wins, 1)
+                )
+                result_cols[f"sub_rate_{side}"].append(
+                    sum(1 for m in methods if m == "SUB") / max(n_wins, 1)
+                )
+
+                recent = wins[-3:] if len(wins) >= 3 else wins
+                result_cols[f"recent_form_3_{side}"].append(np.mean(recent))
+
+                last_date = hist[-1]["date"]
+                result_cols[f"days_since_last_fight_{side}"].append(
+                    max((date - last_date).days, 0)
+                )
+
+            # Record this fight in history (after computing features)
+            fighter_history.setdefault(fighter, []).append({
+                "date": date,
+                "won": won,
+                "method_cat": row.method_cat,
+            })
+
+    for col, vals in result_cols.items():
+        df[col] = vals
+
+    # Compute diffs
+    for stat in stat_cols:
+        df[f"{stat}_diff"] = df[f"{stat}_a"] - df[f"{stat}_b"]
+
+    return df
+
+
+def build_stat_diffs(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute diffs for the per-fighter ufcstats career stats."""
+    stat_pairs = [
+        ("sig_strikes_landed_pm", "sig_strikes_landed_pm_diff"),
+        ("sig_strikes_accuracy", "sig_strike_acc_diff"),
+        ("sig_strikes_defended", "sig_strike_def_diff"),
+        ("takedown_avg_per15m", "td_avg_diff"),
+        ("takedown_accuracy", "td_acc_diff"),
+        ("takedown_defence", "td_def_diff"),
+        ("submission_avg_attempted_per15m", "sub_avg_diff"),
+        ("sig_strikes_absorbed_pm", "sig_strikes_absorbed_pm_diff"),
+    ]
+
+    for suffix, diff_col in stat_pairs:
+        a_col = f"a_{suffix}"
+        b_col = f"b_{suffix}"
+        if a_col in df.columns and b_col in df.columns:
+            df[diff_col] = pd.to_numeric(df[a_col], errors="coerce") - \
+                           pd.to_numeric(df[b_col], errors="coerce")
+        else:
+            df[diff_col] = 0.0
+
     return df
 
 
@@ -157,20 +263,59 @@ def build_feature_matrix(fights_path: str = FIGHTS_PATH,
     print("Loading fight data...")
     df = pd.read_parquet(fights_path)
 
-    print("Building Glicko-2 ratings...")
-    df = build_glicko2(df)
+    print("Building Glicko-2 and Elo ratings...")
+    df = build_ratings(df)
 
-    print("Building rolling stats...")
+    print("Building rolling fighter stats...")
     df = build_rolling_stats(df)
 
-    # Verify all features present
+    print("Building stat diffs...")
+    df = build_stat_diffs(df)
+
+    # Fill NaN with defaults
+    fill_values = {
+        "market_prob": 0.5,
+        "market_overround": 1.0,
+        "height_diff_cm": 0.0,
+        "reach_diff_cm": 0.0,
+        "age_diff": 0.0,
+        "age_fighter": 30.0,
+        "win_pct_diff": 0.0,
+        "win_streak_diff": 0,
+        "ko_rate_diff": 0.0,
+        "sub_rate_diff": 0.0,
+        "recent_form_3_diff": 0.0,
+        "days_since_last_fight_diff": 0.0,
+        "sig_strikes_landed_pm_diff": 0.0,
+        "sig_strike_acc_diff": 0.0,
+        "sig_strike_def_diff": 0.0,
+        "td_avg_diff": 0.0,
+        "td_acc_diff": 0.0,
+        "td_def_diff": 0.0,
+        "sub_avg_diff": 0.0,
+        "stance_matchup": 0,
+        "weight_class_encoded": 170,
+        "is_title_fight": 0,
+        "is_main_event": 0,
+        "glicko_rating_diff": 0.0,
+        "glicko_rd_diff": 0.0,
+        "glicko_uncertainty": 495.0,
+        "elo_diff": 0.0,
+    }
+    for col, val in fill_values.items():
+        if col in df.columns:
+            df[col] = df[col].fillna(val)
+
+    # Verify features
     missing = [c for c in FEATURE_COLS if c not in df.columns]
     if missing:
-        print(f"  Warning: missing features (will fill with defaults): {missing}")
-        for col in missing:
-            df[col] = 0.0
+        raise ValueError(f"Missing features: {missing}")
 
-    print(f"Feature matrix: {df.shape}")
+    # Only keep fights with odds for backtesting
+    has_odds = df["odds_a"].notna() & df["odds_b"].notna()
+    print(f"  {has_odds.sum()} fights with odds (of {len(df)} total)")
+    print(f"  Feature matrix shape: {df.shape}")
+
     if output_path:
         df.to_parquet(output_path, index=False)
         print(f"Saved to {output_path}")

@@ -36,11 +36,12 @@ TEST_END = 2025
 KELLY_FRACTION = 0.25
 MAX_BET_FRACTION = 0.05
 MIN_STAKE = 5.0
-EDGE_THRESHOLD = 0.05
+EDGE_THRESHOLD = 0.08
 MAX_ODDS = 4.0  # MMA has more upsets than AFL, wider range
 MIN_MODEL_PROB = 0.52  # lower than AFL — MMA is less predictable
 INITIAL_BANKROLL = 1000.0
 SAMPLE_WEIGHT_HALF_LIFE = 2.0  # years; MMA evolves faster than AFL
+STACKER_C_VALUES = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0]
 
 # --- Feature Columns ---
 FEATURE_COLS = [
@@ -57,18 +58,13 @@ FEATURE_COLS = [
     "reach_diff_cm",
     "age_diff",
     "age_fighter",
-    # Career stats (rolling/cumulative)
+    # Rolling stats (computed from fight history, no future leakage)
     "win_pct_diff",
     "win_streak_diff",
     "ko_rate_diff",
     "sub_rate_diff",
-    "sig_strikes_landed_pm_diff",
-    "sig_strike_acc_diff",
-    "sig_strike_def_diff",
-    "td_avg_diff",
-    "td_acc_diff",
-    "td_def_diff",
-    "sub_avg_diff",
+    # NOTE: sig_strikes, td, sub_avg diffs REMOVED — ufcstats career stats
+    # are scraped at collection time (2023), not point-in-time. Future leakage.
     # Form
     "days_since_last_fight_diff",
     "recent_form_3_diff",
