@@ -1,0 +1,32 @@
+# Data
+data/
+*.parquet
+*.xlsx
+*.csv
+!requirements.txt
+
+# Models
+models/
+*.pkl
+*.joblib
+
+# Cache
+.odds_cache/
+__pycache__/
+*.pyc
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Claude
+.claude/
