@@ -159,20 +159,54 @@ plt.close(fig)
 print("  model_comparison.png")
 
 
-# -- 5. Calibration comparison (market vs ensemble) ------------------------
+# -- 5. Calibration from walk-forward OOS predictions ----------------------
+# Collect OOS predictions across all backtest years (not just bets)
+from model import fit_model_bundle
+
+oos_probs_all = []
+oos_market_all = []
+oos_y_all = []
+
+df_odds = df[df["odds_a"].notna() & df["odds_b"].notna()].copy()
+for year in range(2018, 2024):
+    train_data = df_odds[df_odds["year"] <= year - 3].copy()
+    cal_data = df_odds[(df_odds["year"] >= year - 2) & (df_odds["year"] <= year - 1)].copy()
+    test_data = df_odds[df_odds["year"] == year].copy()
+
+    if len(train_data) < 100 or len(cal_data) < 40 or len(test_data) == 0:
+        continue
+
+    pred, _ = fit_model_bundle(train_data, cal_data)
+    probs_a = pred.predict_proba(test_data[FEATURE_COLS])[:, 1]
+
+    # Use both sides: fighter_a prob and fighter_b prob (1 - prob_a)
+    # This gives us the full probability range 0-1
+    oos_probs_all.extend(probs_a.tolist())
+    oos_probs_all.extend((1 - probs_a).tolist())
+    market_p = test_data["market_prob"].to_numpy()
+    oos_market_all.extend(market_p.tolist())
+    oos_market_all.extend((1 - market_p).tolist())
+    y = test_data["a_wins"].to_numpy()
+    oos_y_all.extend(y.tolist())
+    oos_y_all.extend((1 - y).tolist())
+
+oos_probs_all = np.array(oos_probs_all)
+oos_market_all = np.array(oos_market_all)
+oos_y_all = np.array(oos_y_all)
+
 fig, ax = plt.subplots(figsize=(6, 6))
 
-for probs, label, color, marker in [
-    (market_eval, "Market", "#6b7280", "o"),
-    (ens_eval, "Ensemble", "#2563eb", "s"),
+for probs_cal, label, color, marker in [
+    (oos_market_all, "Market", "#6b7280", "o"),
+    (oos_probs_all, "Ensemble", "#2563eb", "s"),
 ]:
-    frac_pos, mean_pred = calibration_curve(y_eval, _clip_probs(probs), n_bins=10)
+    frac_pos, mean_pred = calibration_curve(oos_y_all, _clip_probs(probs_cal), n_bins=10)
     ax.plot(mean_pred, frac_pos, f"{marker}-", label=label, color=color, markersize=6)
 
 ax.plot([0, 1], [0, 1], "k--", alpha=0.4, label="Perfect")
 ax.set_xlabel("Predicted Probability")
 ax.set_ylabel("Observed Frequency")
-ax.set_title(f"Fig. 4: Calibration Curves ({eval_label} Set)")
+ax.set_title(f"Fig. 4: Calibration Curves (Walk-Forward OOS, 2018-2023, n={len(oos_y_all)//2})")
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
 fig.tight_layout()
