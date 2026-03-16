@@ -115,9 +115,10 @@ print("  yearly_pnl.png")
 
 # -- 4. Model comparison bar chart ----------------------------------------
 print("Training model for evaluation metrics...")
-result = train_models(df)
+df_odds = df[df["odds_a"].notna() & df["odds_b"].notna()].copy()
+result = train_models(df_odds)
 predictor = result["predictor"]
-_, val, test = temporal_split(df)
+_, val, test = temporal_split(df_odds)
 
 # Use val set since MMA test split may be empty depending on config
 eval_set = test if not test.empty else val
