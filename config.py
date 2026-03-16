@@ -57,9 +57,7 @@ FEATURE_COLS = [
     "height_diff_cm",
     "reach_diff_cm",
     "age_diff",
-    "age_fighter",
     # Rolling stats (computed from fight history, no future leakage)
-    "win_pct_diff",
     "win_streak_diff",
     "ko_rate_diff",
     "sub_rate_diff",
@@ -72,10 +70,7 @@ FEATURE_COLS = [
     "kd_pm_diff",
     # Form
     "days_since_last_fight_diff",
-    "recent_form_3_diff",
     # Context
-    "is_title_fight",
-    "is_main_event",
     "weight_class_encoded",
     # Stance matchup
     "stance_matchup",

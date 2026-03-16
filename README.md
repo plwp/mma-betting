@@ -4,7 +4,7 @@
 
 ## Abstract
 
-We built an ensemble machine learning system to identify value bets in UFC/MMA head-to-head markets. The system combines individual Glicko-2 ratings, Elo ratings, per-fight rolling statistics scraped from ufcstats.com, physical attributes, and bookmaker odds via a calibrated logit-space stacker. Over a 6-year walk-forward backtest (2018-2023), the strategy produced +6.4% ROI on 199 bets with a 63.8% win rate, growing a $1,000 bankroll to $1,898. Unlike the AFL version, individual fighter sports offer more data (500+ fights/year vs 200 matches/year) but higher variance (one-punch KOs) and a different market structure (name recognition bias, casual money).
+We built an ensemble machine learning system to identify value bets in UFC/MMA head-to-head markets. The system combines individual Glicko-2 ratings, Elo ratings, per-fight rolling statistics scraped from ufcstats.com, physical attributes, and bookmaker odds via a calibrated logit-space stacker. Over a 6-year walk-forward backtest (2018-2023), the strategy produced +8.0% ROI on 222 bets with a 66.2% win rate, growing a $1,000 bankroll to $2,746. Unlike the AFL version, individual fighter sports offer more data (500+ fights/year vs 200 matches/year) but higher variance (one-punch KOs) and a different market structure (name recognition bias, casual money).
 
 The system also includes a Pinnacle steam monitor for detecting sharp line movements before AU books adjust.
 
@@ -36,18 +36,18 @@ MMA betting markets are less efficient than major team sports: name recognition 
 
 ### 3.1 Feature Engineering
 
-25 features across 7 categories, all computed without lookahead bias:
+20 features across 7 categories, all computed without lookahead bias:
 
 | Category | Features | Construction |
 |----------|----------|-------------|
 | Glicko-2 | `glicko_rating_diff`, `glicko_rd_diff`, `glicko_uncertainty` | Individual Glicko-2 with RD inflation (30 per 90 days of inactivity) |
 | Elo | `elo_diff` | Standard Elo with K=32 |
 | Market odds | `market_prob`, `market_overround` | Implied probabilities from decimal odds, normalised for overround |
-| Physical | `height_diff_cm`, `reach_diff_cm`, `age_diff`, `age_fighter` | Static physical attributes from fighter profiles |
-| Career stats | `win_pct_diff`, `win_streak_diff`, `ko_rate_diff`, `sub_rate_diff` | Rolling cumulative stats computed from fight history (no leakage) |
+| Physical | `height_diff_cm`, `reach_diff_cm`, `age_diff` | Static physical attributes from fighter profiles |
+| Career stats | `win_streak_diff`, `ko_rate_diff`, `sub_rate_diff` | Rolling cumulative stats computed from fight history (no leakage) |
 | Per-fight stats | `sig_str_pm_diff`, `sig_str_acc_diff`, `td_pm_diff`, `td_acc_diff`, `sub_att_pm_diff`, `kd_pm_diff` | Point-in-time rolling averages from scraped per-fight data |
-| Context | `is_title_fight`, `is_main_event`, `weight_class_encoded`, `stance_matchup` | Fight card metadata, stance encoding (orthodox/southpaw/switch) |
-| Form | `days_since_last_fight_diff`, `recent_form_3_diff` | Activity gap, recent 3-fight form |
+| Context | `weight_class_encoded`, `stance_matchup` | Weight class, stance encoding (orthodox/southpaw/switch) |
+| Form | `days_since_last_fight_diff` | Activity gap between fighters |
 
 **Training weights**: Exponential sample weighting with a 2-year half-life (MMA evolves faster than AFL -- styles and meta shift rapidly).
 
@@ -55,7 +55,7 @@ MMA betting markets are less efficient than major team sports: name recognition 
 
 ```mermaid
 graph LR
-    A[25 Features] --> B[Logistic Regression]
+    A[20 Features] --> B[Logistic Regression]
     A --> C[LightGBM]
     A --> X[XGBoost]
     D[Market Odds] --> E[Calibrated Stacker]
@@ -110,12 +110,12 @@ Static evaluation: trained on all fights with odds through 2021, calibrated on 2
 | Model | Log Loss | Brier Score | Accuracy | vs Market LL |
 |-------|----------|-------------|----------|--------------|
 | Market | 0.6040 | 0.2086 | 67.9% | -- |
-| Logistic Regression | 0.6127 | 0.2123 | 67.3% | -0.0087 (worse) |
-| LightGBM | 0.6110 | 0.2114 | 67.3% | -0.0070 (worse) |
-| XGBoost | 0.6103 | 0.2113 | 67.5% | -0.0063 (worse) |
-| **Ensemble (stacker)** | **0.6003** | **0.2073** | **67.8%** | **+0.0036 (better)** |
+| Logistic Regression | 0.6128 | 0.2123 | 67.5% | -0.0089 (worse) |
+| LightGBM | 0.6120 | 0.2120 | 66.8% | -0.0080 (worse) |
+| XGBoost | 0.6106 | 0.2115 | 67.5% | -0.0066 (worse) |
+| **Ensemble (stacker)** | **0.6000** | **0.2072** | **68.3%** | **+0.0039 (better)** |
 
-Same pattern as AFL: no base model beats the market individually. The stacker recovers a small edge (+0.0036 log loss) by blending signals. MMA markets are slightly less efficient than AFL (market log loss 0.604 vs 0.593) but also harder to model (higher base model losses).
+Same pattern as AFL: no base model beats the market individually. The stacker recovers a small edge (+0.0039 log loss) by blending signals. MMA markets are slightly less efficient than AFL (market log loss 0.604 vs 0.593) but also harder to model (higher base model losses).
 
 ![Model Comparison](charts/model_comparison.png)
 
@@ -127,24 +127,22 @@ Both market and ensemble produce reasonably calibrated probabilities. The ensemb
 
 ### 4.3 Feature Importance
 
-Market probability dominates (108 splits). The model's marginal contribution comes from takedown stats, Glicko-2 rating deviation, KO rate, age, and submission rate -- signals the market may partially discount.
+Market probability dominates (104 splits). The model's marginal contribution comes from takedown stats (25 splits), Glicko-2 rating deviation (24), Glicko rating diff (21), KO rate (18), and submission rate (15) -- signals the market may partially discount. After pruning 5 zero-importance features (v6), only `win_streak_diff` and `glicko_uncertainty` remain at zero splits.
 
 ![Feature Importance](charts/feature_importance.png)
-
-Six features have zero importance (`age_fighter`, `recent_form_3_diff`, `is_title_fight`, `is_main_event`, `glicko_uncertainty`, `win_pct_diff`) and are candidates for pruning.
 
 ### 4.4 Backtest Performance
 
 | Metric | Value |
 |--------|-------|
-| Total Bets | 199 |
-| Win Rate | 63.8% (127W / 72L) |
-| Total Staked | $14,064 |
-| Total P&L | +$898 |
-| ROI on Stakes | +6.4% |
-| Bankroll Return | +89.8% ($1,000 -> $1,898) |
-| Max Drawdown | -28.3% |
-| Sharpe-like Ratio | 1.07 |
+| Total Bets | 222 |
+| Win Rate | 66.2% (147W / 75L) |
+| Total Staked | $21,884 |
+| Total P&L | +$1,746 |
+| ROI on Stakes | +8.0% |
+| Bankroll Return | +174.6% ($1,000 -> $2,746) |
+| Max Drawdown | -37.6% |
+| Sharpe-like Ratio | 1.35 |
 
 ![Bankroll Curve](charts/bankroll_curve.png)
 
@@ -152,20 +150,20 @@ Six features have zero importance (`age_fighter`, `recent_form_3_diff`, `is_titl
 
 | Year | Bets | P&L | Bankroll |
 |------|------|-----|----------|
-| 2018 | 46 | +$239 | $1,239 |
-| 2019 | 26 | +$352 | $1,592 |
-| 2020 | 4 | +$177 | $1,768 |
-| 2021 | 58 | +$220 | $1,988 |
-| 2022 | 56 | -$351 | $1,637 |
-| 2023 | 9 | +$261 | $1,898 |
+| 2018 | 50 | +$536 | $1,536 |
+| 2019 | 31 | +$660 | $2,196 |
+| 2020 | 4 | +$229 | $2,424 |
+| 2021 | 51 | +$433 | $2,857 |
+| 2022 | 74 | -$721 | $2,136 |
+| 2023 | 12 | +$610 | $2,746 |
 
 ![Annual P&L](charts/yearly_pnl.png)
 
-Profitable in 5 of 6 years. 2022 is the only losing year (-$351, 56 bets), coinciding with a period of high market volatility in MMA. The system recovered fully in 2023.
+Profitable in 5 of 6 years. 2022 is the only losing year (-$721, 74 bets), coinciding with a period of high market volatility in MMA. The system recovered fully in 2023.
 
 ### 4.6 Bet-Level Analysis
 
-The cumulative P&L curve shows the system building profit steadily through 2018-2021 before the 2022 drawdown. The recovery in 2023 (9 high-conviction bets, +$261) demonstrates the strategy's ability to be selective when confidence is low.
+The cumulative P&L curve shows the system building profit steadily through 2018-2021 before the 2022 drawdown. The recovery in 2023 (12 high-conviction bets, +$610) demonstrates the strategy's ability to be selective when confidence is low.
 
 ![Cumulative P&L](charts/cumulative_pnl.png)
 
@@ -182,8 +180,8 @@ The cumulative P&L curve shows the system building profit steadily through 2018-
 
 ### Why we're still cautious
 
-1. **Max drawdown is steep.** -28.3% is uncomfortable. The 2022 losing streak of 56 bets net negative would test anyone's conviction.
-2. **No base model beats the market.** Same fundamental issue as AFL -- all individual models have worse log loss than bookmaker odds. The stacker's edge is thin (+0.0036).
+1. **Max drawdown is steep.** -37.6% is uncomfortable. The 2022 losing streak of 74 bets net negative would test anyone's conviction.
+2. **No base model beats the market.** Same fundamental issue as AFL -- all individual models have worse log loss than bookmaker odds. The stacker's edge is thin (+0.0039).
 3. **Historical odds quality.** The jansen88 dataset's odds come from a single source. Real execution would face different prices.
 4. **No closing line value analysis.** Unlike the AFL project, we haven't measured CLV. This is a critical missing validation.
 5. **BestFightOdds not integrated.** BFO renders odds via JavaScript, so historical multi-bookmaker odds aren't available for backtesting. This limits our ability to test best-available pricing.
@@ -194,17 +192,17 @@ The cumulative P&L curve shows the system building profit steadily through 2018-
 | Metric | AFL | MMA |
 |--------|-----|-----|
 | Backtest period | 2015-2024 (10yr) | 2018-2023 (6yr) |
-| Total bets | 74 | 199 |
-| Win rate | 67.6% | 63.8% |
-| ROI | +12.8% | +6.4% |
-| Bankroll return | +33.5% | +89.8% |
-| Max drawdown | -18.4% | -28.3% |
-| Sharpe | 1.19 | 1.07 |
+| Total bets | 74 | 222 |
+| Win rate | 67.6% | 66.2% |
+| ROI | +12.8% | +8.0% |
+| Bankroll return | +33.5% | +174.6% |
+| Max drawdown | -18.4% | -37.6% |
+| Sharpe | 1.19 | 1.35 |
 | Base models | 4 + market | 3 + market |
-| Features | 45 | 25 |
+| Features | 36 | 20 |
 | Edge threshold | 5% | 10% |
 
-MMA has lower ROI per bet but more bets, resulting in higher absolute bankroll growth. The higher drawdown reflects MMA's inherent variance.
+MMA has lower ROI per bet but more bets and higher compound returns, resulting in much higher absolute bankroll growth. The higher drawdown reflects MMA's inherent variance.
 
 ## 6. Steam Monitor
 
@@ -234,7 +232,7 @@ graph TD
     T --> U[fight_stats.parquet]
     E --> F[features.py]
     U --> F
-    F --> J[feature_matrix.parquet<br/>25 features per fight]
+    F --> J[feature_matrix.parquet<br/>20 features per fight]
     J --> K[model.py<br/>Train Ensemble]
     J --> L[backtest.py<br/>Walk-Forward Test]
     K --> M[model_bundle.pkl]
@@ -293,13 +291,15 @@ generate_charts.py     Publication charts for this README
 3. **Per-fight stats** -- Scraped 8,500+ fights from ufcstats.com detail pages. Built proper point-in-time rolling averages (sig strikes, takedowns, submissions, knockdowns). This replaced the leaked career stats and provided genuine predictive signal.
 4. **Edge threshold optimisation** -- Swept 5%, 8%, 10%, 12%, 15%. 10% was the clear winner on Sharpe ratio (1.07) with acceptable drawdown (-28.3%).
 5. **Dataset extension** -- Scraped 1,229 new fights (Oct 2023 - Mar 2026) from ufcstats event pages. Ratings now cover 2,675 fighters through current events.
+6. **Feature pruning** -- Removed 5 zero-importance features (`age_fighter`, `recent_form_3_diff`, `is_title_fight`, `is_main_event`, `win_pct_diff`), improving ROI from +6.4% to +8.0% and Sharpe from 1.07 to 1.35. Same pattern as AFL where pruning improved ROI from +4.6% to +8.6%.
+7. **Strategy analysis** -- Added fav/underdog split, edge bucket analysis, and pseudo-CLV metrics. Underdogs outperform favourites (+16% vs +6.2% ROI). Negative edge-win correlation (-0.116) suggests no additional filters are warranted — the model's edge is uniform across bet types.
 
 ### Next steps
 
-- **Prune zero-importance features** (6 candidates) following the AFL playbook where pruning improved ROI from +4.6% to +8.6%
 - **Integrate BestFightOdds** for multi-bookmaker historical odds (requires JS rendering solution)
 - **Closing line value analysis** to validate whether the model edge is genuine or variance
-- **Strategy refinement** -- underdog filters, weight-class-specific thresholds, fight card position
+- **Investigate 2022 drawdown** -- 74 bets at -$721 is the weakest year; understanding what changed in MMA markets could improve robustness
+- **Strategy refinement** -- the 15-20% edge bucket underperforms (-6.1% ROI on 51 bets), but sample size too small for a robust filter
 
 ## License
 

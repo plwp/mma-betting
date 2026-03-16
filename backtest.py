@@ -151,7 +151,61 @@ def _compute_summary(bets_df, bankroll_history, initial_bankroll):
     print(f"  Sharpe-like:      {sharpe:.2f}")
     print(f"  Final Bankroll:   ${bankroll_history[-1][1]:,.2f}")
 
+    _print_strategy_analysis(bets_df)
+    _print_edge_predictiveness(bets_df)
+
     return {"summary": summary, "bets_df": bets_df, "bankroll_history": bankroll_history}
+
+
+def _print_strategy_analysis(bets_df):
+    """Analyse bet log: fav/dog split, weight class, edge buckets."""
+    if bets_df.empty:
+        return
+
+    print("\n=== Strategy Analysis ===")
+
+    # Favourite vs underdog
+    bets_df = bets_df.copy()
+    bets_df["is_fav"] = bets_df["odds"] < 2.0
+    for label, mask in [("Favourite", bets_df["is_fav"]), ("Underdog", ~bets_df["is_fav"])]:
+        subset = bets_df[mask]
+        if len(subset) == 0:
+            continue
+        roi = subset["pnl"].sum() / subset["stake"].sum() * 100
+        wr = subset["won"].mean() * 100
+        print(f"  {label:12s}: {len(subset):3d} bets, {wr:.1f}% win, {roi:+.1f}% ROI")
+
+    # Edge buckets
+    print("\n  Edge Buckets:")
+    bins = [(0.10, 0.15, "10-15%"), (0.15, 0.20, "15-20%"), (0.20, 0.30, "20-30%"), (0.30, 1.0, "30%+")]
+    for lo, hi, label in bins:
+        subset = bets_df[(bets_df["edge"] >= lo) & (bets_df["edge"] < hi)]
+        if len(subset) == 0:
+            continue
+        roi = subset["pnl"].sum() / subset["stake"].sum() * 100
+        wr = subset["won"].mean() * 100
+        print(f"    {label:8s}: {len(subset):3d} bets, {wr:.1f}% win, {roi:+.1f}% ROI")
+
+
+def _print_edge_predictiveness(bets_df):
+    """Pseudo-CLV: edge size vs win rate, model-market spread."""
+    if bets_df.empty or len(bets_df) < 10:
+        return
+
+    print("\n=== Edge Predictiveness (Pseudo-CLV) ===")
+
+    # Correlation between edge and outcome
+    corr = bets_df["edge"].corr(bets_df["won"].astype(float))
+    print(f"  Edge-Win correlation:  {corr:.3f}")
+
+    # Model-market spread
+    bets_df = bets_df.copy()
+    bets_df["spread"] = bets_df["model_prob"] - bets_df["market_prob"]
+    spread_corr = bets_df["spread"].corr(bets_df["won"].astype(float))
+    print(f"  Spread-Win correlation: {spread_corr:.3f}")
+    print(f"  Mean spread (model - market): {bets_df['spread'].mean():.3f}")
+    print(f"  Mean edge on wins:  {bets_df[bets_df['won']]['edge'].mean():.3f}")
+    print(f"  Mean edge on losses: {bets_df[~bets_df['won']]['edge'].mean():.3f}")
 
 
 def plot_bankroll(bankroll_history, path="models/bankroll_curve.png"):
