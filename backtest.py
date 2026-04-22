@@ -18,7 +18,7 @@ from strategy import BettingStrategy
 def walk_forward_backtest(
     df: pd.DataFrame,
     start_year: int = 2017,
-    end_year: int = 2023,
+    end_year: int = 2025,
     initial_bankroll: float = INITIAL_BANKROLL,
     edge_threshold: float = EDGE_THRESHOLD,
     max_odds: float = MAX_ODDS,

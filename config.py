@@ -15,8 +15,16 @@ FEATURE_PATH = os.path.join(DATA_DIR, "feature_matrix.parquet")
 # --- Data Sources ---
 # ufcstats.com: official UFC stats (round-by-round)
 UFC_STATS_BASE = "http://ufcstats.com/statistics/events/completed?page=all"
-# BestFightOdds: historical closing odds from 12+ bookmakers
+# BestFightOdds: historical closing odds from 12+ bookmakers (scrapeable SSR;
+# used only as fallback if the maintained dataset below falls behind).
 BFO_BASE = "https://www.bestfightodds.com"
+# shortlikeafox/ultimate_ufc_dataset: actively maintained odds+stats dataset,
+# successor to the abandoned jansen88/ufc-data feed. Updated weekly, sourced
+# from BestFightOdds. Covers 2010-present with ~97% odds coverage on UFC cards.
+ULTIMATE_UFC_URL = (
+    "https://raw.githubusercontent.com/shortlikeafox/ultimate_ufc_dataset"
+    "/main/ufc-master.csv"
+)
 
 # --- Glicko-2 Parameters ---
 GLICKO2_INIT_RATING = 1500.0
